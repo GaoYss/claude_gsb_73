@@ -1,6 +1,11 @@
 package pagination
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+
+	"gorm.io/gorm"
+)
 
 const (
 	// DefaultPage 默认页码。
@@ -77,4 +82,21 @@ func (q Query) OrderClause() string {
 		return column + " DESC, id DESC"
 	}
 	return column + " ASC, id ASC"
+}
+
+// Fetch 执行"统计总数 + 分页查询"的标准列表查询, 是全部列表接口的唯一执行入口。
+// base 工厂每次返回一个带筛选条件的全新会话, 保证 Count 与 Find 使用完全相同的条件,
+// 从而满足"同一条件下任何页面的条数与顺序一致"的不变量。
+// countErr / listErr 为各模块既有的错误提示文案, 原样包装底层错误。
+func Fetch[T any](base func() *gorm.DB, page Query, countErr, listErr string) ([]T, int64, error) {
+	var total int64
+	if err := base().Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("%s: %w", countErr, err)
+	}
+
+	items := make([]T, 0)
+	if err := base().Order(page.OrderClause()).Offset(page.Offset()).Limit(page.Limit()).Find(&items).Error; err != nil {
+		return nil, 0, fmt.Errorf("%s: %w", listErr, err)
+	}
+	return items, total, nil
 }
