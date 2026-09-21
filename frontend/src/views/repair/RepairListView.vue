@@ -6,29 +6,14 @@
     </PageHeader>
 
     <el-card shadow="never">
-      <div class="filter-bar">
-        <el-input v-model="query.keyword" placeholder="维修单号 / 故障单号 / 路灯编号 / 维修人员" clearable @keyup.enter="handleSearch" />
-        <el-select v-model="query.status" placeholder="维修状态" clearable @change="handleSearch">
-          <el-option v-for="(item, key) in REPAIR_STATUS" :key="key" :label="item.label" :value="key" />
-        </el-select>
-        <el-select v-model="query.result" placeholder="维修结果" clearable @change="handleSearch">
-          <el-option v-for="(item, key) in REPAIR_RESULT" :key="key" :label="item.label" :value="key" />
-        </el-select>
-        <el-select v-model="query.repairman" placeholder="维修人员" clearable @change="handleSearch">
-          <el-option v-for="item in dictStore.repairMeta.repairmen" :key="item" :label="item" :value="item" />
-        </el-select>
-        <el-date-picker
-          v-model="dateRange"
-          type="daterange"
-          value-format="YYYY-MM-DD"
-          range-separator="至"
-          start-placeholder="开工开始日期"
-          end-placeholder="开工结束日期"
-          @change="handleSearch"
-        />
-        <el-button type="primary" :icon="Search" @click="handleSearch">查询</el-button>
-        <el-button :icon="RefreshLeft" @click="handleReset">重置</el-button>
-      </div>
+      <FilterBar
+        :fields="repairFilterFields"
+        :model-value="query"
+        :dict-store="dictStore"
+        @update:model-value="patchQuery"
+        @search="search"
+        @reset="reset"
+      />
     </el-card>
 
     <el-card shadow="never">
@@ -88,16 +73,18 @@
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, RefreshLeft, Search } from '@element-plus/icons-vue'
+import { Plus, Refresh } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusTag from '@/components/common/StatusTag.vue'
 import DataPagination from '@/components/common/DataPagination.vue'
+import FilterBar from '@/components/common/FilterBar.vue'
 import RepairFormDialog from './components/RepairFormDialog.vue'
 import FinishRepairDialog from './components/FinishRepairDialog.vue'
 import FaultDetailDrawer from '@/views/fault/components/FaultDetailDrawer.vue'
 import { repairApi } from '@/api/repair'
 import { useDictStore } from '@/stores/dict'
 import { REPAIR_RESULT, REPAIR_STATUS } from '@/constants/dict'
+import { repairFilterFields } from '@/constants/listSchemas'
 import { formatDateTime, formatDuration, formatMoney } from '@/utils/format'
 import { useListPage } from '@/composables/useListPage'
 
@@ -105,37 +92,15 @@ const route = useRoute()
 const router = useRouter()
 const dictStore = useDictStore()
 
-const { loading, rows, total, query, load, search, reset, changePage, changePageSize } = useListPage(repairApi.list, {
-  keyword: '',
-  status: '',
-  result: '',
-  repairman: '',
-  start_date: '',
-  end_date: '',
-})
+const { loading, rows, total, query, load, search, reset, changePage, changePageSize, patchQuery } =
+  useListPage(repairApi.list, repairFilterFields)
 
-const dateRange = ref([])
 const formVisible = ref(false)
 const finishVisible = ref(false)
 const detailVisible = ref(false)
 const editing = ref(null)
 const finishing = ref(null)
 const activeFaultId = ref(null)
-
-function applyDateRange() {
-  query.start_date = dateRange.value?.[0] ?? ''
-  query.end_date = dateRange.value?.[1] ?? ''
-}
-
-function handleSearch() {
-  applyDateRange()
-  search()
-}
-
-function handleReset() {
-  dateRange.value = []
-  reset()
-}
 
 function openCreate() {
   editing.value = null

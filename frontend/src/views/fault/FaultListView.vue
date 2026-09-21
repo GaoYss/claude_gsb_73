@@ -6,30 +6,14 @@
     </PageHeader>
 
     <el-card shadow="never">
-      <div class="filter-bar">
-        <el-input v-model="query.keyword" placeholder="故障单号 / 路灯编号 / 道路 / 描述" clearable @keyup.enter="handleSearch" />
-        <el-select v-model="query.status" placeholder="处理状态" clearable @change="handleSearch">
-          <el-option v-for="(item, key) in FAULT_STATUS" :key="key" :label="item.label" :value="key" />
-        </el-select>
-        <el-select v-model="query.fault_type" placeholder="故障类型" clearable @change="handleSearch">
-          <el-option v-for="item in faultTypeOptions" :key="item" :label="item" :value="item" />
-        </el-select>
-        <el-select v-model="query.fault_level" placeholder="紧急程度" clearable @change="handleSearch">
-          <el-option v-for="(item, key) in FAULT_LEVEL" :key="key" :label="item.label" :value="key" />
-        </el-select>
-        <el-date-picker
-          v-model="dateRange"
-          type="daterange"
-          value-format="YYYY-MM-DD"
-          range-separator="至"
-          start-placeholder="上报开始日期"
-          end-placeholder="上报结束日期"
-          @change="handleSearch"
-        />
-        <el-checkbox v-model="query.only_open" @change="handleSearch">仅看未闭环</el-checkbox>
-        <el-button type="primary" :icon="Search" @click="handleSearch">查询</el-button>
-        <el-button :icon="RefreshLeft" @click="handleReset">重置</el-button>
-      </div>
+      <FilterBar
+        :fields="faultFilterFields"
+        :model-value="query"
+        :dict-store="dictStore"
+        @update:model-value="patchQuery"
+        @search="search"
+        @reset="reset"
+      />
     </el-card>
 
     <el-card shadow="never">
@@ -89,17 +73,19 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, RefreshLeft, Search } from '@element-plus/icons-vue'
+import { Plus, Refresh } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusTag from '@/components/common/StatusTag.vue'
 import DataPagination from '@/components/common/DataPagination.vue'
+import FilterBar from '@/components/common/FilterBar.vue'
 import FaultFormDialog from './components/FaultFormDialog.vue'
 import FaultDetailDrawer from './components/FaultDetailDrawer.vue'
 import RepairFormDialog from '@/views/repair/components/RepairFormDialog.vue'
 import { faultApi } from '@/api/fault'
 import { lampApi } from '@/api/lamp'
 import { useDictStore } from '@/stores/dict'
-import { FAULT_LEVEL, FAULT_SOURCE, FAULT_STATUS, dictLabel } from '@/constants/dict'
+import { FAULT_LEVEL, FAULT_SOURCE, FAULT_STATUS, dictLabel, isFaultOpen } from '@/constants/dict'
+import { faultFilterFields } from '@/constants/listSchemas'
 import { formatDateTime } from '@/utils/format'
 import { useListPage } from '@/composables/useListPage'
 
@@ -107,19 +93,11 @@ const route = useRoute()
 const router = useRouter()
 const dictStore = useDictStore()
 
-const { loading, rows, total, query, load, search, reset, changePage, changePageSize } = useListPage(faultApi.list, {
-  keyword: '',
-  status: '',
-  fault_type: '',
-  fault_level: '',
-  start_date: '',
-  end_date: '',
-  only_open: false,
-})
+const { loading, rows, total, query, load, search, reset, changePage, changePageSize, patchQuery } =
+  useListPage(faultApi.list, faultFilterFields)
 
 const faultTypeOptions = computed(() => dictStore.faultMeta.fault_types)
 
-const dateRange = ref([])
 const formVisible = ref(false)
 const detailVisible = ref(false)
 const repairVisible = ref(false)
@@ -128,23 +106,7 @@ const presetLamp = ref(null)
 const repairTarget = ref(null)
 const activeFaultId = ref(null)
 
-const isOpen = (row) => row.status === 'pending' || row.status === 'processing'
-
-// 日期区间变化时同步到查询条件。
-function applyDateRange() {
-  query.start_date = dateRange.value?.[0] ?? ''
-  query.end_date = dateRange.value?.[1] ?? ''
-}
-
-function handleSearch() {
-  applyDateRange()
-  search()
-}
-
-function handleReset() {
-  dateRange.value = []
-  reset()
-}
+const isOpen = (row) => isFaultOpen(row.status)
 
 function openCreate() {
   editing.value = null

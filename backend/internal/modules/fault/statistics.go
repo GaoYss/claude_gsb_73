@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"streetlight/pkg/query"
 )
 
 // Count 统计故障总数。
@@ -19,7 +21,7 @@ func (r *Repository) Count(ctx context.Context) (int64, error) {
 func (r *Repository) CountOpen(ctx context.Context) (int64, error) {
 	var total int64
 	err := r.session(ctx).Model(&Fault{}).
-		Where("status IN ?", []string{StatusPending, StatusProcessing}).
+		Where("status IN ?", OpenStatuses()).
 		Count(&total).Error
 	if err != nil {
 		return 0, fmt.Errorf("统计未闭环故障失败: %w", err)
@@ -61,12 +63,19 @@ func (r *Repository) CountReportedBetween(ctx context.Context, from, to time.Tim
 	return total, nil
 }
 
+// overdueConditions 是"超期未处理"的权威查询条件: 仍待处理且登记时间早于分界时刻。
+// 与 IsOverdue 的判定保持一一对应, 供超期计数与超期列表共用。
+func overdueConditions(before time.Time) []query.Condition {
+	return []query.Condition{
+		query.Eq("status", StatusPending),
+		query.TimeRange("reported_at", nil, &before),
+	}
+}
+
 // CountPendingBefore 统计 before 之前登记且仍未开工的故障数量, 用于超期预警。
 func (r *Repository) CountPendingBefore(ctx context.Context, before time.Time) (int64, error) {
 	var total int64
-	err := r.session(ctx).Model(&Fault{}).
-		Where("status = ? AND reported_at < ?", StatusPending, before).
-		Count(&total).Error
+	err := query.Apply(r.session(ctx).Model(&Fault{}), overdueConditions(before)...).Count(&total).Error
 	if err != nil {
 		return 0, fmt.Errorf("统计超期未处理故障失败: %w", err)
 	}
@@ -79,8 +88,7 @@ func (r *Repository) ListPendingBefore(ctx context.Context, before time.Time, li
 		limit = 10
 	}
 	entities := make([]Fault, 0)
-	err := r.session(ctx).Model(&Fault{}).
-		Where("status = ? AND reported_at < ?", StatusPending, before).
+	err := query.Apply(r.session(ctx).Model(&Fault{}), overdueConditions(before)...).
 		Order("reported_at ASC, id ASC").
 		Limit(limit).
 		Find(&entities).Error

@@ -12,6 +12,7 @@ import (
 
 	"streetlight/internal/apperr"
 	"streetlight/pkg/pagination"
+	"streetlight/pkg/query"
 )
 
 // Filter 是仓储层使用的维修记录查询条件。
@@ -122,7 +123,7 @@ func (r *Repository) GetByID(ctx context.Context, id uint) (*Repair, error) {
 // List 分页查询维修记录。
 func (r *Repository) List(ctx context.Context, filter Filter, page pagination.Query) ([]Repair, int64, error) {
 	base := func() *gorm.DB {
-		return applyFilter(r.session(ctx).Model(&Repair{}), filter)
+		return query.Apply(r.session(ctx).Model(&Repair{}), filter.Conditions()...)
 	}
 
 	var total int64
@@ -282,7 +283,7 @@ func (r *Repository) AverageDurationHours(ctx context.Context) (float64, error) 
 func (r *Repository) DistinctValues(ctx context.Context, column string) ([]string, error) {
 	values := make([]string, 0)
 	err := r.session(ctx).Model(&Repair{}).
-		Where(column + " <> ''").
+		Where(column+" <> ''").
 		Distinct().
 		Order(column).
 		Pluck(column, &values).Error
@@ -290,42 +291,6 @@ func (r *Repository) DistinctValues(ctx context.Context, column string) ([]strin
 		return nil, fmt.Errorf("查询 %s 选项失败: %w", column, err)
 	}
 	return values, nil
-}
-
-// applyFilter 统一拼装维修记录查询条件。
-func applyFilter(statement *gorm.DB, filter Filter) *gorm.DB {
-	if keyword := strings.TrimSpace(filter.Keyword); keyword != "" {
-		like := "%" + keyword + "%"
-		statement = statement.Where(
-			"repair_no LIKE ? OR fault_no LIKE ? OR lamp_code LIKE ? OR repairman LIKE ?",
-			like, like, like, like,
-		)
-	}
-	if filter.FaultID > 0 {
-		statement = statement.Where("fault_id = ?", filter.FaultID)
-	}
-	if filter.LampID > 0 {
-		statement = statement.Where("lamp_id = ?", filter.LampID)
-	}
-	if value := strings.TrimSpace(filter.Repairman); value != "" {
-		statement = statement.Where("repairman = ?", value)
-	}
-	if value := strings.TrimSpace(filter.RepairTeam); value != "" {
-		statement = statement.Where("repair_team = ?", value)
-	}
-	if filter.Status != "" {
-		statement = statement.Where("status = ?", filter.Status)
-	}
-	if filter.Result != "" {
-		statement = statement.Where("result = ?", filter.Result)
-	}
-	if filter.StartedFrom != nil {
-		statement = statement.Where("started_at >= ?", *filter.StartedFrom)
-	}
-	if filter.StartedTo != nil {
-		statement = statement.Where("started_at < ?", *filter.StartedTo)
-	}
-	return statement
 }
 
 // isUniqueViolation 兼容 sqlite 与 postgres 的唯一约束冲突判断。

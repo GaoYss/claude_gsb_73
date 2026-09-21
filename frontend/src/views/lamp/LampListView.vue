@@ -6,20 +6,14 @@
     </PageHeader>
 
     <el-card shadow="never">
-      <div class="filter-bar">
-        <el-input v-model="query.keyword" placeholder="编号 / 名称 / 道路 / 地址" clearable @keyup.enter="search" />
-        <el-select v-model="query.road_name" placeholder="所在道路" clearable>
-          <el-option v-for="road in dictStore.lampOptions.roads" :key="road" :label="road" :value="road" />
-        </el-select>
-        <el-select v-model="query.lamp_type" placeholder="灯具类型" clearable>
-          <el-option v-for="item in dictStore.lampOptions.lamp_types" :key="item" :label="item" :value="item" />
-        </el-select>
-        <el-select v-model="query.run_status" placeholder="运行状态" clearable>
-          <el-option v-for="(item, key) in RUN_STATUS" :key="key" :label="item.label" :value="key" />
-        </el-select>
-        <el-button type="primary" :icon="Search" @click="search">查询</el-button>
-        <el-button :icon="RefreshLeft" @click="reset">重置</el-button>
-      </div>
+      <FilterBar
+        :fields="lampFilterFields"
+        :model-value="query"
+        :dict-store="dictStore"
+        @update:model-value="patchQuery"
+        @search="search"
+        @reset="reset"
+      />
     </el-card>
 
     <el-card shadow="never">
@@ -74,24 +68,24 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, RefreshLeft, Search } from '@element-plus/icons-vue'
+import { Plus, Refresh } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusTag from '@/components/common/StatusTag.vue'
 import DataPagination from '@/components/common/DataPagination.vue'
+import FilterBar from '@/components/common/FilterBar.vue'
 import LampFormDialog from './components/LampFormDialog.vue'
 import { lampApi } from '@/api/lamp'
 import { useDictStore } from '@/stores/dict'
 import { RUN_STATUS } from '@/constants/dict'
+import { lampFilterFields } from '@/constants/listSchemas'
 import { formatDate } from '@/utils/format'
 import { useListPage } from '@/composables/useListPage'
 
 const router = useRouter()
 const dictStore = useDictStore()
 
-const { loading, rows, total, query, load, search, reset, changePage, changePageSize } = useListPage(
-  lampApi.list,
-  { keyword: '', road_name: '', lamp_type: '', run_status: '' },
-)
+const { loading, rows, total, query, load, search, reset, changePage, changePageSize, patchQuery } =
+  useListPage(lampApi.list, lampFilterFields)
 
 const dialogVisible = ref(false)
 const editing = ref(null)

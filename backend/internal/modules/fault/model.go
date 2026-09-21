@@ -1,6 +1,8 @@
 package fault
 
-import "time"
+import (
+	"time"
+)
 
 // 故障处理状态。
 const (
@@ -9,6 +11,11 @@ const (
 	StatusRepaired   = "repaired"   // 已修复
 	StatusClosed     = "closed"     // 已关闭
 )
+
+// OverdueThreshold 是"超期未处理"的统一时长阈值:
+// 处于待处理状态且上报时间早于 now - 阈值 的故障记为超期。
+// 看板概览、超期列表与未来的筛选能力都引用此常量, 保证口径一致。
+const OverdueThreshold = 24 * time.Hour
 
 // 故障等级(紧急程度)。
 const (
@@ -61,7 +68,32 @@ func IsValidStatus(status string) bool {
 
 // IsOpen 判断故障是否仍处于未闭环状态。
 func IsOpen(status string) bool {
-	return status == StatusPending || status == StatusProcessing
+	for _, item := range OpenStatuses() {
+		if status == item {
+			return true
+		}
+	}
+	return false
+}
+
+// OpenStatuses 返回未闭环故障的状态集合(待处理 + 维修中)。
+// 所有"仅看未闭环"的筛选、统计、存在性校验都必须引用该集合,
+// 禁止在各处内联 []string{pending, processing}。
+func OpenStatuses() []string {
+	return []string{StatusPending, StatusProcessing}
+}
+
+// OverdueCutoff 返回超期判定的分界时刻: 在 now 视角下,
+// reported_at 早于该时刻且仍处于待处理状态即为超期。
+func OverdueCutoff(now time.Time) time.Time {
+	return now.Add(-OverdueThreshold)
+}
+
+// IsOverdue 判断某条故障在 now 视角下是否"超期未处理"。
+// 这是逾期判定的唯一权威定义: 仅待处理(pending)且登记时长超过阈值才算,
+// 维修中/已修复/已关闭均不算超期。
+func IsOverdue(entity Fault, now time.Time) bool {
+	return entity.Status == StatusPending && entity.ReportedAt.Before(OverdueCutoff(now))
 }
 
 // canTransitTo 校验状态流转是否合法。

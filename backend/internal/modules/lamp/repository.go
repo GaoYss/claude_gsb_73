@@ -11,6 +11,7 @@ import (
 
 	"streetlight/internal/apperr"
 	"streetlight/pkg/pagination"
+	"streetlight/pkg/query"
 )
 
 // Repository 负责路灯台账的数据访问。
@@ -91,9 +92,11 @@ func (r *Repository) ExistsByCode(ctx context.Context, code string, excludeID ui
 }
 
 // List 分页查询路灯台账, 返回列表与总数。
+// 统计与查询共用 LedgerConditions 构造的同一份条件。
 func (r *Repository) List(ctx context.Context, filter ListQuery, page pagination.Query) ([]Lamp, int64, error) {
+	conditions := LedgerConditions(filter.Keyword, filter.RoadName, filter.District, filter.LampType, filter.RunStatus, "")
 	base := func() *gorm.DB {
-		return applyFilters(r.session(ctx).Model(&Lamp{}), filter)
+		return query.Apply(r.session(ctx).Model(&Lamp{}), conditions...)
 	}
 
 	var total int64
@@ -168,7 +171,7 @@ func (r *Repository) CountByColumn(ctx context.Context, column string) (map[stri
 func (r *Repository) DistinctValues(ctx context.Context, column string) ([]string, error) {
 	values := make([]string, 0)
 	err := r.session(ctx).Model(&Lamp{}).
-		Where(column + " <> ''").
+		Where(column+" <> ''").
 		Distinct().
 		Order(column).
 		Pluck(column, &values).Error
@@ -193,28 +196,4 @@ func (r *Repository) NextCode(ctx context.Context) (string, error) {
 		}
 	}
 	return fmt.Sprintf("LD-%05d", next), nil
-}
-
-// applyFilters 统一拼装列表查询条件。
-func applyFilters(statement *gorm.DB, filter ListQuery) *gorm.DB {
-	if keyword := strings.TrimSpace(filter.Keyword); keyword != "" {
-		like := "%" + keyword + "%"
-		statement = statement.Where(
-			"code LIKE ? OR name LIKE ? OR road_name LIKE ? OR address LIKE ?",
-			like, like, like, like,
-		)
-	}
-	if value := strings.TrimSpace(filter.RoadName); value != "" {
-		statement = statement.Where("road_name = ?", value)
-	}
-	if value := strings.TrimSpace(filter.District); value != "" {
-		statement = statement.Where("district = ?", value)
-	}
-	if value := strings.TrimSpace(filter.LampType); value != "" {
-		statement = statement.Where("lamp_type = ?", value)
-	}
-	if value := strings.TrimSpace(filter.RunStatus); value != "" {
-		statement = statement.Where("run_status = ?", value)
-	}
-	return statement
 }

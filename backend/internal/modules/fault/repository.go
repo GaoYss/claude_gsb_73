@@ -12,6 +12,7 @@ import (
 
 	"streetlight/internal/apperr"
 	"streetlight/pkg/pagination"
+	"streetlight/pkg/query"
 )
 
 // Filter 是仓储层使用的故障查询条件, 日期已在服务层解析为时间。
@@ -150,7 +151,7 @@ func (r *Repository) GetByNo(ctx context.Context, faultNo string) (*Fault, error
 // List 分页查询故障记录。
 func (r *Repository) List(ctx context.Context, filter Filter, page pagination.Query) ([]Fault, int64, error) {
 	base := func() *gorm.DB {
-		return applyFilter(r.session(ctx).Model(&Fault{}), filter)
+		return query.Apply(r.session(ctx).Model(&Fault{}), filter.Conditions()...)
 	}
 
 	var total int64
@@ -179,7 +180,7 @@ func (r *Repository) ListByLamp(ctx context.Context, lampID uint) ([]Fault, erro
 func (r *Repository) GetOpenByLamp(ctx context.Context, lampID uint) (*Fault, error) {
 	var entity Fault
 	err := r.session(ctx).
-		Where("lamp_id = ? AND status IN ?", lampID, []string{StatusPending, StatusProcessing}).
+		Where("lamp_id = ? AND status IN ?", lampID, OpenStatuses()).
 		Order("reported_at DESC, id DESC").
 		First(&entity).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -195,7 +196,7 @@ func (r *Repository) GetOpenByLamp(ctx context.Context, lampID uint) (*Fault, er
 func (r *Repository) CountOpenByLamp(ctx context.Context, lampID uint) (int64, error) {
 	var count int64
 	err := r.session(ctx).Model(&Fault{}).
-		Where("lamp_id = ? AND status IN ?", lampID, []string{StatusPending, StatusProcessing}).
+		Where("lamp_id = ? AND status IN ?", lampID, OpenStatuses()).
 		Count(&count).Error
 	if err != nil {
 		return 0, fmt.Errorf("统计路灯未闭环故障失败: %w", err)
@@ -224,45 +225,6 @@ func (r *Repository) StatusCountsForLamp(ctx context.Context, lampID uint) (map[
 		result[item.Label] = item.Total
 	}
 	return result, nil
-}
-
-// applyFilter 统一拼装故障列表查询条件。
-func applyFilter(statement *gorm.DB, filter Filter) *gorm.DB {
-	if keyword := strings.TrimSpace(filter.Keyword); keyword != "" {
-		like := "%" + keyword + "%"
-		statement = statement.Where(
-			"fault_no LIKE ? OR lamp_code LIKE ? OR road_name LIKE ? OR description LIKE ?",
-			like, like, like, like,
-		)
-	}
-	if filter.Status != "" {
-		statement = statement.Where("status = ?", filter.Status)
-	}
-	if filter.FaultType != "" {
-		statement = statement.Where("fault_type = ?", filter.FaultType)
-	}
-	if filter.FaultLevel != "" {
-		statement = statement.Where("fault_level = ?", filter.FaultLevel)
-	}
-	if filter.Source != "" {
-		statement = statement.Where("source = ?", filter.Source)
-	}
-	if filter.LampID > 0 {
-		statement = statement.Where("lamp_id = ?", filter.LampID)
-	}
-	if value := strings.TrimSpace(filter.RoadName); value != "" {
-		statement = statement.Where("road_name = ?", value)
-	}
-	if filter.ReportedFrom != nil {
-		statement = statement.Where("reported_at >= ?", *filter.ReportedFrom)
-	}
-	if filter.ReportedTo != nil {
-		statement = statement.Where("reported_at < ?", *filter.ReportedTo)
-	}
-	if filter.OnlyOpen {
-		statement = statement.Where("status IN ?", []string{StatusPending, StatusProcessing})
-	}
-	return statement
 }
 
 // isUniqueViolation 兼容 sqlite 与 postgres 的唯一约束冲突判断。

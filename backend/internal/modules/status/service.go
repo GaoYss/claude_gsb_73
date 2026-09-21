@@ -14,10 +14,11 @@ import (
 	"streetlight/internal/modules/lamp"
 	"streetlight/internal/modules/repair"
 	"streetlight/pkg/pagination"
+	"streetlight/pkg/query"
 )
 
-// OverdueThreshold 是判定"超期未处理"的时长阈值。
-const OverdueThreshold = 24 * time.Hour
+// OverdueThreshold 复用故障模块的统一超期阈值, 保证看板与登记页口径一致。
+var OverdueThreshold = fault.OverdueThreshold
 
 // lampStatusSortSpec 定义维修状态列表允许的排序字段。
 var lampStatusSortSpec = pagination.SortSpec{
@@ -67,7 +68,8 @@ func (s *Service) Overview(ctx context.Context) (*Overview, error) {
 	now := time.Now()
 	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	tomorrow := todayStart.AddDate(0, 0, 1)
-	overdueBefore := now.Add(-OverdueThreshold)
+	// 超期分界统一使用故障模块的权威定义, 避免看板与列表阈值漂移。
+	overdueBefore := fault.OverdueCutoff(now)
 
 	lampTotal, err := s.lamps.Count(ctx)
 	if err != nil {
@@ -177,34 +179,23 @@ func (s *Service) Overview(ctx context.Context) (*Overview, error) {
 }
 
 // Lamps 查询路灯维修状态列表: 在台账信息之上叠加当前故障与最近一次维修进展。
-func (s *Service) Lamps(ctx context.Context, query LampQuery) ([]LampStatusRow, int64, pagination.Query, error) {
-	page := pagination.Parse(query.Params, lampStatusSortSpec)
+func (s *Service) Lamps(ctx context.Context, queryInput LampQuery) ([]LampStatusRow, int64, pagination.Query, error) {
+	page := pagination.Parse(queryInput.Params, lampStatusSortSpec)
 
+	// 台账维度的 keyword/road_name/lamp_type/run_status 必须与 /lamps 共用同一套条件,
+	// 这里仅额外指定表别名前缀 "lamp."; only_open 是该读模型特有的 EXISTS 条件。
+	conditions := lamp.LedgerConditions(
+		queryInput.Keyword, queryInput.RoadName, "",
+		queryInput.LampType, queryInput.RunStatus, "lamp.",
+	)
+	if queryInput.OnlyOpen {
+		conditions = append(conditions, query.Exists(
+			"SELECT 1 FROM fault WHERE fault.lamp_id = lamp.id AND fault.status IN ?",
+			fault.OpenStatuses(),
+		))
+	}
 	base := func() *gorm.DB {
-		statement := s.db.WithContext(ctx).Model(&lamp.Lamp{})
-		if keyword := strings.TrimSpace(query.Keyword); keyword != "" {
-			like := "%" + keyword + "%"
-			statement = statement.Where(
-				"lamp.code LIKE ? OR lamp.name LIKE ? OR lamp.road_name LIKE ? OR lamp.address LIKE ?",
-				like, like, like, like,
-			)
-		}
-		if value := strings.TrimSpace(query.RoadName); value != "" {
-			statement = statement.Where("lamp.road_name = ?", value)
-		}
-		if value := strings.TrimSpace(query.LampType); value != "" {
-			statement = statement.Where("lamp.lamp_type = ?", value)
-		}
-		if value := strings.TrimSpace(query.RunStatus); value != "" {
-			statement = statement.Where("lamp.run_status = ?", value)
-		}
-		if query.OnlyOpen {
-			statement = statement.Where(
-				"EXISTS (SELECT 1 FROM fault WHERE fault.lamp_id = lamp.id AND fault.status IN ?)",
-				[]string{fault.StatusPending, fault.StatusProcessing},
-			)
-		}
-		return statement
+		return query.Apply(s.db.WithContext(ctx).Model(&lamp.Lamp{}), conditions...)
 	}
 
 	var total int64
@@ -358,7 +349,7 @@ func (s *Service) countFaultsByLamp(ctx context.Context, lampIDs []uint, openOnl
 		Select("lamp_id, COUNT(*) AS total").
 		Where("lamp_id IN ?", lampIDs)
 	if openOnly {
-		statement = statement.Where("status IN ?", []string{fault.StatusPending, fault.StatusProcessing})
+		statement = statement.Where("status IN ?", fault.OpenStatuses())
 	}
 	if err := statement.Group("lamp_id").Scan(&rows).Error; err != nil {
 		return nil, err
@@ -375,7 +366,7 @@ func (s *Service) countFaultsByLamp(ctx context.Context, lampIDs []uint, openOnl
 func (s *Service) currentFaults(ctx context.Context, lampIDs []uint) (map[uint]fault.Fault, error) {
 	entities := make([]fault.Fault, 0)
 	err := s.db.WithContext(ctx).Model(&fault.Fault{}).
-		Where("lamp_id IN ? AND status IN ?", lampIDs, []string{fault.StatusPending, fault.StatusProcessing}).
+		Where("lamp_id IN ? AND status IN ?", lampIDs, fault.OpenStatuses()).
 		Order("reported_at DESC, id DESC").
 		Find(&entities).Error
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"streetlight/internal/apperr"
 	"streetlight/internal/modules/lamp"
 	"streetlight/pkg/pagination"
+	"streetlight/pkg/query"
 )
 
 // faultSortSpec 定义故障列表接口允许的排序字段白名单。
@@ -245,8 +246,9 @@ func (s *Service) Metadata() *Meta {
 	}
 }
 
-// OnRepairStarted 维修开工: 故障进入维修中, 维修次数累加, 并同步路灯状态。
-func (s *Service) OnRepairStarted(ctx context.Context, faultID uint, repairID uint) error {
+// OnRepairStarted 维修开工: 故障进入维修中, 维修次数与最新维修记录由维修模块
+// 依据 repair 表实时归集后传入(单一数据来源), 并同步路灯状态。
+func (s *Service) OnRepairStarted(ctx context.Context, faultID uint, repairCount int, latestRepairID *uint) error {
 	entity, err := s.repo.GetByID(ctx, faultID)
 	if err != nil {
 		return err
@@ -255,11 +257,12 @@ func (s *Service) OnRepairStarted(ctx context.Context, faultID uint, repairID ui
 		return apperr.Conflict("故障 %s 当前状态为 %s, 不允许开工维修", entity.FaultNo, StatusLabel(entity.Status))
 	}
 
-	entity.Status = StatusProcessing
-	entity.RepairCount++
-	entity.LatestRepairID = &repairID
-
-	if err := s.repo.Update(ctx, entity); err != nil {
+	columns := map[string]any{
+		"status":           StatusProcessing,
+		"repair_count":     repairCount,
+		"latest_repair_id": latestRepairID,
+	}
+	if err := s.repo.UpdateColumns(ctx, faultID, columns); err != nil {
 		return err
 	}
 	return s.syncLampStatus(ctx, entity.LampID)
@@ -305,56 +308,37 @@ func (s *Service) SyncRepairStats(ctx context.Context, faultID uint, repairCount
 }
 
 // syncLampStatus 依据该路灯的故障分布重新计算并写回运行状态。
+// 推导规则统一由 lamp.DeriveRunStatus 提供, 故障模块只负责给出计数。
 func (s *Service) syncLampStatus(ctx context.Context, lampID uint) error {
 	counts, err := s.repo.StatusCountsForLamp(ctx, lampID)
 	if err != nil {
 		return err
 	}
-
-	status := lamp.RunStatusNormal
-	switch {
-	case counts[StatusProcessing] > 0:
-		status = lamp.RunStatusMaintenance
-	case counts[StatusPending] > 0:
-		status = lamp.RunStatusFault
-	}
+	status := lamp.DeriveRunStatus(counts[StatusProcessing], counts[StatusPending])
 	return s.lamps.UpdateRunStatus(ctx, lampID, status)
 }
 
 // buildFilter 将列表查询参数转换为仓储条件, 并解析日期区间。
-func buildFilter(query ListQuery) (Filter, error) {
+func buildFilter(listQuery ListQuery) (Filter, error) {
+	reportedFrom, reportedTo, err := query.ParseHalfOpenRange(listQuery.StartDate, listQuery.EndDate)
+	if err != nil {
+		return Filter{}, err
+	}
 	filter := Filter{
-		Keyword:    strings.TrimSpace(query.Keyword),
-		Status:     strings.TrimSpace(query.Status),
-		FaultType:  strings.TrimSpace(query.FaultType),
-		FaultLevel: strings.TrimSpace(query.FaultLevel),
-		Source:     strings.TrimSpace(query.Source),
-		LampID:     query.LampID,
-		RoadName:   strings.TrimSpace(query.RoadName),
-		OnlyOpen:   query.OnlyOpen,
+		Keyword:      strings.TrimSpace(listQuery.Keyword),
+		Status:       strings.TrimSpace(listQuery.Status),
+		FaultType:    strings.TrimSpace(listQuery.FaultType),
+		FaultLevel:   strings.TrimSpace(listQuery.FaultLevel),
+		Source:       strings.TrimSpace(listQuery.Source),
+		LampID:       listQuery.LampID,
+		RoadName:     strings.TrimSpace(listQuery.RoadName),
+		ReportedFrom: reportedFrom,
+		ReportedTo:   reportedTo,
+		OnlyOpen:     listQuery.OnlyOpen,
 	}
 
 	if filter.Status != "" && !IsValidStatus(filter.Status) {
 		return filter, apperr.BadRequest("非法的故障状态: %s", filter.Status)
-	}
-
-	if strings.TrimSpace(query.StartDate) != "" {
-		from, err := parseDay(query.StartDate)
-		if err != nil {
-			return filter, err
-		}
-		filter.ReportedFrom = &from
-	}
-	if strings.TrimSpace(query.EndDate) != "" {
-		to, err := parseDay(query.EndDate)
-		if err != nil {
-			return filter, err
-		}
-		to = to.AddDate(0, 0, 1)
-		filter.ReportedTo = &to
-	}
-	if filter.ReportedFrom != nil && filter.ReportedTo != nil && filter.ReportedTo.Before(*filter.ReportedFrom) {
-		return filter, apperr.BadRequest("结束日期不能早于开始日期")
 	}
 	return filter, nil
 }
@@ -366,23 +350,9 @@ func faultNoPrefix(reportedAt time.Time) string {
 
 // parseReportedAt 解析上报时间, 支持 RFC3339 与常见的日期时间格式, 为空时取当前时间。
 func parseReportedAt(value string) (time.Time, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return time.Now(), nil
-	}
-	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02"} {
-		if parsed, err := time.ParseInLocation(layout, value, time.Local); err == nil {
-			return parsed, nil
-		}
-	}
-	return time.Time{}, apperr.BadRequest("上报时间格式不正确, 建议使用 YYYY-MM-DD HH:mm:ss: %s", value)
-}
-
-// parseDay 解析 YYYY-MM-DD 日期, 返回当天零点。
-func parseDay(value string) (time.Time, error) {
-	date, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(value), time.Local)
-	if err != nil {
-		return time.Time{}, apperr.BadRequest("日期格式应为 YYYY-MM-DD, 当前值: %s", value)
-	}
-	return date, nil
+	return query.ParseFlexibleTime(
+		value,
+		time.Now(),
+		"上报时间格式不正确, 建议使用 YYYY-MM-DD HH:mm:ss: %s",
+	)
 }

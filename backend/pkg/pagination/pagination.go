@@ -1,6 +1,10 @@
 package pagination
 
-import "strings"
+import (
+	"strings"
+
+	"gorm.io/gorm"
+)
 
 const (
 	// DefaultPage 默认页码。
@@ -77,4 +81,27 @@ func (q Query) OrderClause() string {
 		return column + " DESC, id DESC"
 	}
 	return column + " ASC, id ASC"
+}
+
+// FindPage 基于"同一个条件构造函数"执行总数统计与分页查询,
+// 从机制上保证任何读模型的 total 与 items 口径完全一致。
+//
+// scoped 接收一个基础会话(通常是 db.Model(&Entity{})), 在其上追加筛选条件;
+// 统计总数与查询列表两次调用得到的条件必须相同, 排序/分页只附加在列表查询上。
+// 数据库错误原样返回, 由调用方按模块语义包装文案。
+func FindPage[T any](ctxSession *gorm.DB, page Query, scoped func(*gorm.DB) *gorm.DB) ([]T, int64, error) {
+	var total int64
+	if err := scoped(ctxSession).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	items := make([]T, 0)
+	if err := scoped(ctxSession).
+		Order(page.OrderClause()).
+		Offset(page.Offset()).
+		Limit(page.Limit()).
+		Find(&items).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
 }

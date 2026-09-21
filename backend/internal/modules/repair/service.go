@@ -9,6 +9,7 @@ import (
 	"streetlight/internal/apperr"
 	"streetlight/internal/modules/fault"
 	"streetlight/pkg/pagination"
+	"streetlight/pkg/query"
 )
 
 // repairSortSpec 定义维修记录列表允许的排序字段白名单。
@@ -26,9 +27,11 @@ var repairSortSpec = pagination.SortSpec{
 }
 
 // FaultPort 由故障登记模块实现, 维修模块通过它联动故障状态与路灯状态。
+// 维修次数与最新维修记录始终由维修模块从 repair 表实时归集后传入,
+// 保证 fault.repair_count 永远等于该故障在 repair 表中的实际记录数。
 type FaultPort interface {
 	GetByID(ctx context.Context, id uint) (*fault.Fault, error)
-	OnRepairStarted(ctx context.Context, faultID uint, repairID uint) error
+	OnRepairStarted(ctx context.Context, faultID uint, repairCount int, latestRepairID *uint) error
 	OnRepairFinished(ctx context.Context, faultID uint, fixed bool) error
 	SyncRepairStats(ctx context.Context, faultID uint, repairCount int, latestRepairID *uint) error
 }
@@ -125,13 +128,38 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Repair, error
 		return nil, err
 	}
 
-	// 开工后: 故障转为维修中, 路灯转为维修状态
-	if err := s.faults.OnRepairStarted(ctx, target.ID, entity.ID); err != nil {
+	// 开工后: 故障转为维修中, 路灯转为维修状态。
+	// 维修次数与最新维修记录统一从 repair 表归集, 而非由故障侧自增。
+	count, err := s.repo.CountByFault(ctx, target.ID)
+	if err != nil {
+		return nil, err
+	}
+	latestID := entity.ID
+	if err := s.faults.OnRepairStarted(ctx, target.ID, int(count), &latestID); err != nil {
 		return nil, err
 	}
 
 	entity.FillDuration()
 	return entity, nil
+}
+
+// gatherRepairStats 从 repair 表归集某条故障的维修次数与最新维修记录,
+// 是写入 fault.repair_count / latest_repair_id 的唯一数据出口。
+func (s *Service) gatherRepairStats(ctx context.Context, faultID uint) (int, *uint, error) {
+	count, err := s.repo.CountByFault(ctx, faultID)
+	if err != nil {
+		return 0, nil, err
+	}
+	latest, err := s.repo.LatestByFault(ctx, faultID)
+	if err != nil {
+		return 0, nil, err
+	}
+	var latestID *uint
+	if latest != nil {
+		id := latest.ID
+		latestID = &id
+	}
+	return int(count), latestID, nil
 }
 
 // Update 修改维修记录, 已完成的记录不允许修改。
@@ -253,20 +281,12 @@ func (s *Service) Delete(ctx context.Context, id uint) error {
 		return err
 	}
 
-	count, err := s.repo.CountByFault(ctx, entity.FaultID)
+	count, latestID, err := s.gatherRepairStats(ctx, entity.FaultID)
 	if err != nil {
 		return err
-	}
-	latest, err := s.repo.LatestByFault(ctx, entity.FaultID)
-	if err != nil {
-		return err
-	}
-	var latestID *uint
-	if latest != nil {
-		latestID = &latest.ID
 	}
 
-	if err := s.faults.SyncRepairStats(ctx, entity.FaultID, int(count), latestID); err != nil {
+	if err := s.faults.SyncRepairStats(ctx, entity.FaultID, count, latestID); err != nil {
 		slog.Warn("同步故障维修统计失败", "fault_id", entity.FaultID, "error", err)
 	}
 	return nil
@@ -323,15 +343,21 @@ func (s *Service) Statistics(ctx context.Context) (*Statistics, error) {
 }
 
 // buildFilter 将查询参数转换为仓储条件并解析日期区间。
-func buildFilter(query ListQuery) (Filter, error) {
+func buildFilter(listQuery ListQuery) (Filter, error) {
+	startedFrom, startedTo, err := query.ParseHalfOpenRange(listQuery.StartDate, listQuery.EndDate)
+	if err != nil {
+		return Filter{}, err
+	}
 	filter := Filter{
-		Keyword:    strings.TrimSpace(query.Keyword),
-		FaultID:    query.FaultID,
-		LampID:     query.LampID,
-		Repairman:  strings.TrimSpace(query.Repairman),
-		RepairTeam: strings.TrimSpace(query.RepairTeam),
-		Status:     strings.TrimSpace(query.Status),
-		Result:     strings.TrimSpace(query.Result),
+		Keyword:     strings.TrimSpace(listQuery.Keyword),
+		FaultID:     listQuery.FaultID,
+		LampID:      listQuery.LampID,
+		Repairman:   strings.TrimSpace(listQuery.Repairman),
+		RepairTeam:  strings.TrimSpace(listQuery.RepairTeam),
+		Status:      strings.TrimSpace(listQuery.Status),
+		Result:      strings.TrimSpace(listQuery.Result),
+		StartedFrom: startedFrom,
+		StartedTo:   startedTo,
 	}
 	if filter.Status != "" && filter.Status != StatusOngoing && filter.Status != StatusFinished {
 		return filter, apperr.BadRequest("非法的维修状态: %s", filter.Status)
@@ -339,49 +365,12 @@ func buildFilter(query ListQuery) (Filter, error) {
 	if filter.Result != "" && !IsValidResult(filter.Result) {
 		return filter, apperr.BadRequest("非法的维修结果: %s", filter.Result)
 	}
-
-	if value := strings.TrimSpace(query.StartDate); value != "" {
-		from, err := parseDay(value)
-		if err != nil {
-			return filter, err
-		}
-		filter.StartedFrom = &from
-	}
-	if value := strings.TrimSpace(query.EndDate); value != "" {
-		to, err := parseDay(value)
-		if err != nil {
-			return filter, err
-		}
-		to = to.AddDate(0, 0, 1)
-		filter.StartedTo = &to
-	}
-	if filter.StartedFrom != nil && filter.StartedTo != nil && filter.StartedTo.Before(*filter.StartedFrom) {
-		return filter, apperr.BadRequest("结束日期不能早于开始日期")
-	}
 	return filter, nil
 }
 
 // parseTime 解析时间字符串, 为空时返回 fallback。
 func parseTime(value string, fallback time.Time) (time.Time, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return fallback, nil
-	}
-	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02"} {
-		if parsed, err := time.ParseInLocation(layout, value, time.Local); err == nil {
-			return parsed, nil
-		}
-	}
-	return time.Time{}, apperr.BadRequest("时间格式不正确, 建议使用 YYYY-MM-DD HH:mm:ss: %s", value)
-}
-
-// parseDay 解析 YYYY-MM-DD 日期, 返回当天零点。
-func parseDay(value string) (time.Time, error) {
-	date, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(value), time.Local)
-	if err != nil {
-		return time.Time{}, apperr.BadRequest("日期格式应为 YYYY-MM-DD, 当前值: %s", value)
-	}
-	return date, nil
+	return query.ParseFlexibleTime(value, fallback, "时间格式不正确, 建议使用 YYYY-MM-DD HH:mm:ss: %s")
 }
 
 func valueOrZero(value *float64) float64 {

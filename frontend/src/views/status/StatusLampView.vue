@@ -5,18 +5,14 @@
     </PageHeader>
 
     <el-card shadow="never">
-      <div class="filter-bar">
-        <el-input v-model="query.keyword" placeholder="路灯编号 / 名称 / 道路 / 地址" clearable @keyup.enter="search" />
-        <el-select v-model="query.road_name" placeholder="所在道路" clearable>
-          <el-option v-for="road in dictStore.lampOptions.roads" :key="road" :label="road" :value="road" />
-        </el-select>
-        <el-select v-model="query.run_status" placeholder="运行状态" clearable>
-          <el-option v-for="(item, key) in RUN_STATUS" :key="key" :label="item.label" :value="key" />
-        </el-select>
-        <el-checkbox v-model="query.only_open">仅看有未闭环故障</el-checkbox>
-        <el-button type="primary" :icon="Search" @click="search">查询</el-button>
-        <el-button :icon="RefreshLeft" @click="reset">重置</el-button>
-      </div>
+      <FilterBar
+        :fields="statusLampFilterFields"
+        :model-value="query"
+        :dict-store="dictStore"
+        @update:model-value="patchQuery"
+        @search="search"
+        @reset="reset"
+      />
     </el-card>
 
     <el-card shadow="never">
@@ -83,25 +79,23 @@
 <script setup>
 import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { Refresh, RefreshLeft, Search } from '@element-plus/icons-vue'
+import { Refresh } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusTag from '@/components/common/StatusTag.vue'
 import DataPagination from '@/components/common/DataPagination.vue'
+import FilterBar from '@/components/common/FilterBar.vue'
 import { statusApi } from '@/api/status'
 import { useDictStore } from '@/stores/dict'
 import { FAULT_STATUS, REPAIR_RESULT, REPAIR_STATUS, RUN_STATUS, dictLabel } from '@/constants/dict'
+import { statusLampFilterFields } from '@/constants/listSchemas'
 import { formatDateTime } from '@/utils/format'
 import { useListPage } from '@/composables/useListPage'
 
 const router = useRouter()
 const dictStore = useDictStore()
 
-const { loading, rows, total, query, load, search, reset, changePage, changePageSize } = useListPage(statusApi.lamps, {
-  keyword: '',
-  road_name: '',
-  run_status: '',
-  only_open: false,
-})
+const { loading, rows, total, query, load, search, reset, changePage, changePageSize, patchQuery } =
+  useListPage(statusApi.lamps, statusLampFilterFields)
 
 function goTrack(params) {
   router.push({ path: '/status/track', query: params })

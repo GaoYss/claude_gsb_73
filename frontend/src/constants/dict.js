@@ -14,6 +14,16 @@ export const FAULT_STATUS = {
   closed: { label: '已关闭', type: 'info' },
 }
 
+// 未闭环故障的状态集合(待处理 + 维修中)。
+// 与后端 fault.OpenStatuses 一一对应, 前端所有"是否进行中/可操作/仅看未闭环"
+// 的判定都必须引用这里, 禁止在页面内联 pending/processing。
+export const OPEN_FAULT_STATUSES = ['pending', 'processing']
+
+// 判断故障是否仍未闭环。
+export function isFaultOpen(status) {
+  return OPEN_FAULT_STATUSES.includes(status)
+}
+
 // 故障等级(紧急程度)。
 export const FAULT_LEVEL = {
   low: { label: '一般', type: 'info' },
